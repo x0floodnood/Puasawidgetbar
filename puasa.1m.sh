@@ -6,11 +6,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.puasa_widget_config"
 FORCE_WAKTU_ZONE=""
 COUNTDOWN_MODE="solah"
+MENUBAR_MODE="remaining"
 
 save_config() {
   cat > "$CONFIG_FILE" <<EOF
 FORCE_WAKTU_ZONE="${FORCE_WAKTU_ZONE}"
 COUNTDOWN_MODE="${COUNTDOWN_MODE}"
+MENUBAR_MODE="${MENUBAR_MODE}"
 EOF
 }
 
@@ -39,8 +41,17 @@ if [[ "${1:-}" == "--set-mode" && -n "${2:-}" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--set-menubar" && -n "${2:-}" ]]; then
+  if [[ "$2" == "berbuka" || "$2" == "remaining" || "$2" == "progress" ]]; then
+    MENUBAR_MODE="$2"
+    save_config
+  fi
+  exit 0
+fi
+
 export FORCE_WAKTU_ZONE
 export COUNTDOWN_MODE
+export MENUBAR_MODE
 export SCRIPT_PATH="$0"
 
 python3 - <<'PY'
@@ -251,6 +262,7 @@ loc = detect_machine_location()
 country = loc["country"]
 force_zone = os.getenv("FORCE_WAKTU_ZONE", "").strip().upper()
 countdown_mode = os.getenv("COUNTDOWN_MODE", "solah").strip().lower()
+menubar_mode = os.getenv("MENUBAR_MODE", "remaining").strip().lower()
 script_path = os.getenv("SCRIPT_PATH", "./puasa.1m.sh")
 
 
@@ -269,6 +281,12 @@ def make_bar(percent, width=10):
     p = max(0.0, min(100.0, float(percent)))
     filled = int(round((p / 100.0) * width))
     return "[" + ("█" * filled) + ("░" * (width - filled)) + f"] {int(round(p))}%"
+
+
+def make_mini_bar(percent, width=6):
+    p = max(0.0, min(100.0, float(percent)))
+    filled = int(round((p / 100.0) * width))
+    return ("▰" * filled) + ("▱" * (width - filled))
 
 try:
     tz = ZoneInfo(loc.get("timezone") or "UTC")
@@ -371,8 +389,31 @@ asr_dt = parse_time(now, times["asr"])
 maghrib_dt = parse_time(now, times["maghrib"])
 isha_dt = parse_time(now, times["isha"])
 
+schedule = [
+    ("Subuh", fajr_dt),
+    ("Syuruk", syuruk_dt),
+    ("Zohor", dhuhr_dt),
+    ("Asar", asr_dt),
+    ("Maghrib", maghrib_dt),
+    ("Isyak", isha_dt),
+]
+extended = schedule + [("Subuh", fajr_dt + timedelta(days=1))]
+prev_name, prev_time = ("Isyak", isha_dt - timedelta(days=1))
+next_name, next_time = extended[0]
+for name, t in extended:
+    if now < t:
+        next_name, next_time = name, t
+        break
+    prev_name, prev_time = name, t
+remain_next_solah = max(0, int((next_time - now).total_seconds()))
+next_span = max(1.0, (next_time - prev_time).total_seconds())
+next_elapsed = max(0.0, min(next_span, (now - prev_time).total_seconds()))
+next_solah_percent = (next_elapsed / next_span) * 100.0
+
 if countdown_mode not in ("solah", "puasa"):
     countdown_mode = "solah"
+if menubar_mode not in ("berbuka", "remaining", "progress"):
+    menubar_mode = "remaining"
 
 if countdown_mode == "puasa":
     if now < imsak_dt:
@@ -400,30 +441,19 @@ if countdown_mode == "puasa":
     progress_line = f"Puasa Progress {make_bar((elapsed / span) * 100.0)}"
     countdown_line = f"🟢 {state}   {fmt_remaining(remain)} {suffix}"
 else:
-    schedule = [
-        ("Subuh", fajr_dt),
-        ("Syuruk", syuruk_dt),
-        ("Zohor", dhuhr_dt),
-        ("Asar", asr_dt),
-        ("Maghrib", maghrib_dt),
-        ("Isyak", isha_dt),
-    ]
-    extended = schedule + [("Subuh", fajr_dt + timedelta(days=1))]
-    prev_name, prev_time = ("Isyak", isha_dt - timedelta(days=1))
-    next_name, next_time = extended[0]
-    for name, t in extended:
-        if now < t:
-            next_name, next_time = name, t
-            break
-        prev_name, prev_time = name, t
-
-    remain = max(0, int((next_time - now).total_seconds()))
+    remain = remain_next_solah
     span = max(1.0, (next_time - prev_time).total_seconds())
     elapsed = max(0.0, min(span, (now - prev_time).total_seconds()))
     progress_line = f"Solah Progress {make_bar((elapsed / span) * 100.0)}"
     countdown_line = f"🟢 Menuju {next_name}   {fmt_remaining(remain)} lagi"
 
-print(f"☪ B:{times['maghrib']}")
+if menubar_mode == "berbuka":
+    menubar_text = f"☪ B:{times['maghrib']}"
+elif menubar_mode == "progress":
+    menubar_text = f"☪ {next_name} {make_mini_bar(next_solah_percent)}"
+else:
+    menubar_text = f"☪ {next_name} {fmt_remaining(remain_next_solah)}"
+print(menubar_text)
 print("---")
 print("🌙 Puasa | size=15")
 print("---")
@@ -439,6 +469,22 @@ print(progress_line)
 print("---")
 print(f"Refresh ({source_label}, {loc['source']} loc) | refresh=true")
 script_esc = esc(script_path)
+menu_berbuka_mark = " ✅" if menubar_mode == "berbuka" else ""
+menu_remaining_mark = " ✅" if menubar_mode == "remaining" else ""
+menu_progress_mark = " ✅" if menubar_mode == "progress" else ""
+print("Menu Bar Display")
+print(
+    f"--Berbuka Time{menu_berbuka_mark} | bash=\"{script_esc}\" param1=\"--set-menubar\" "
+    "param2=\"berbuka\" refresh=true terminal=false"
+)
+print(
+    f"--Remaining Waktu Solah{menu_remaining_mark} | bash=\"{script_esc}\" param1=\"--set-menubar\" "
+    "param2=\"remaining\" refresh=true terminal=false"
+)
+print(
+    f"--Progress Bar (test){menu_progress_mark} | bash=\"{script_esc}\" param1=\"--set-menubar\" "
+    "param2=\"progress\" refresh=true terminal=false"
+)
 mode_puasa_mark = " ✅" if countdown_mode == "puasa" else ""
 mode_solah_mark = " ✅" if countdown_mode == "solah" else ""
 print("Progress Mode")
